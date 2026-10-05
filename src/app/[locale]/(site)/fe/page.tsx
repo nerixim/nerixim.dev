@@ -4,7 +4,10 @@ import { FeReader } from "@/components/fe/fe-reader"
 import { Link, redirect } from "@/i18n/navigation"
 import type { Locale } from "@/i18n/routing"
 import { buildPageMetadata } from "@/i18n/urls"
+import { getAllPosts } from "@/lib/blog"
 import { IPA_URL, questions } from "@/lib/fe/questions"
+
+const ARTICLE_SLUG = "fe-exam-japanese-for-engineers"
 
 type Props = {
   params: Promise<{ locale: Locale }>
@@ -27,6 +30,8 @@ export default async function FePage({ params }: Props) {
     redirect({ href: "/fe", locale: "en" })
   }
 
+  const articlePublished = (await getAllPosts()).some((post) => post.slug === ARTICLE_SLUG)
+
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-12 sm:px-6 lg:py-16">
       <h1 className="font-bold font-heading text-3xl leading-tight sm:text-4xl">{TITLE}</h1>
@@ -36,12 +41,14 @@ export default async function FePage({ params }: Props) {
         and its meaning in that sentence, pick an answer, and read the key and a short explanation. Each question lists
         the Japanese IT terms next to their English equivalents.
       </p>
-      <p className="mt-3">
-        <Link href="/blog/fe-exam-japanese-for-engineers" className="text-primary underline underline-offset-4">
-          How to read exam Japanese as an engineer
-        </Link>{" "}
-        explains the sentence patterns these questions repeat.
-      </p>
+      {articlePublished && (
+        <p className="mt-3">
+          <Link href={`/blog/${ARTICLE_SLUG}`} className="text-primary underline underline-offset-4">
+            How to read exam Japanese as an engineer
+          </Link>{" "}
+          explains the sentence patterns these questions repeat.
+        </p>
+      )}
 
       <section
         aria-labelledby="notes-title"
