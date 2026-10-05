@@ -1,0 +1,146 @@
+---
+title: "Keeping only the research claims whose quote is on the page"
+description: "A small research runner that makes the model return a verbatim quote with every claim, fetches the cited page itself, and drops the claim when the quote is not there. Counts from four real runs, one claim it caught, and what it gets wrong."
+date: "2026-10-06"
+tags: ["llm", "research", "verification", "ai-agents"]
+published: false
+---
+
+LLM "deep research" tools return a report with confident numbers and a list of links. The number is often not on the linked page. I stopped trusting the report and started treating the model's output as a list of claims to check: each claim has to come with a sentence copied from the page, and a script that never calls a model checks that the sentence is there.
+
+On four runs, the model returned 44 claims. The page contained the quoted sentence for 29. I read the other 15 by hand, and only one of them is a figure that was not on the cited page. The rest are a different kind of failure, and mixing them up is the easiest way to misread this kind of tool.
+
+## What the runner does
+
+One command takes a question and a list of languages. For each language it starts a headless run of Google's Antigravity CLI (`agy`) with search and page-reading tools only. The model searches, reads pages, and has to return JSON in this shape:
+
+```ts
+rows: {
+  type: "array",
+  items: {
+    type: "object",
+    properties: {
+      column: { type: "string" },
+      answer: { type: "string" },
+      url: { type: "string" },
+      quote: { type: "string" },
+    },
+    required: ["column", "answer", "url", "quote"],
+  },
+},
+```
+
+`column` is which part of the question the row answers, `answer` is the fact, `url` is the page, and `quote` is one sentence copied verbatim from that page. The prompt also says: cite one sentence, do not paraphrase, and write `0件` ("zero hits") when nothing qualifies instead of filling the row with something close.
+
+After the model finishes, a separate step fetches every cited URL itself and looks for the quote:
+
+```ts
+export function quotePattern(quote: string, n = QUOTE_CHARS): string {
+  const esc = (c: string): string => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const head = quote.replace(/\s+/g, "").slice(0, n)
+  return [...head]
+    .map((ch) => {
+      const half = ch.normalize("NFKC")
+      return half === ch ? esc(ch) : `(?:${esc(ch)}|${esc(half)})`
+    })
+    .join("\\s*")
+}
+
+export function quoteOnPage(quote: string, text: string): boolean {
+  const head = quote.replace(/\s+/g, "").slice(0, QUOTE_CHARS)
+  if (!head) {
+    return false
+  }
+  return new RegExp(quotePattern(quote)).test(text)
+}
+```
+
+The match uses the first 30 characters of the quote with whitespace ignored, and full-width and half-width forms treated as equal. That matters for Japanese pages, where numbers and punctuation come in both widths. A row that matches goes into the report as verified. A row that does not is listed separately as a candidate, with how the page was fetched and how many characters came back.
+
+## How pages are fetched
+
+The fetch code is shared with a one-page checking script I already used by hand. It tries a text extractor first, then a plain fetch with the markup stripped. If the result is under 1,000 characters, it assumes a JavaScript-rendered shell and loads the page in a headless browser instead. PDFs go through `pdftotext`. The extracted text is cached on disk, so a re-run does not fetch again and I can open exactly what the check saw.
+
+## The numbers
+
+These come from the runner's own ledger, one line per run, recounted on 2026-10-06 in the main checkout (the file has no changes since it was last committed):
+
+```sh
+jq -s 'map(select(.date=="2026-10-03"))
+  | {runs:length, rows:(map(.rows)|add), verified:(map(.verified)|add)}' \
+  state/research/ledger.jsonl
+```
+
+That gives 4 runs, 44 claims returned, 29 matched. The ledger stamps these runs 2026-10-03 (a UTC date), and the totals match the 44 and 29 in my earlier notes. The question for all four was market research on exam-preparation sites: usage numbers, applicant counts and whether past papers may be reused. Two of the runs used three languages and two used one.
+
+| Run | Languages | Claims | Matched | Tokens | Seconds |
+|---|---|---|---|---|---|
+| A | ja | 8 | 5 | 606k | 343 |
+| B | ja, en, ru | 2 | 1 | 548k | 306 |
+| C | ja, en, ru | 14 | 13 | 1.71M | 416 |
+| D | ja | 20 | 10 | 1.27M | 881 |
+
+Each run cost about 1M tokens on average and took a bit over eight minutes. It runs on a flat-rate subscription, so I pay no per-call API bill. The one-language runs (A and D) cost as much as the three-language ones, so language count is not what drives the bill.
+
+## Why 15 claims did not match
+
+I opened the raw rows and the cached page text for each of the 15 misses and sorted them:
+
+| Reason | Count |
+|---|---|
+| The model returned `0件` as the row. There is nothing to find on a page | 8 |
+| The page could not be fetched | 1 |
+| The figure is on the page, but the quote does not match | 5 |
+| The figure is not on the cited page | 1 |
+
+The first line is the one that surprised me. The prompt tells the model to write `0件` when nothing qualifies, and the model does, as a normal row with `0件` in the quote field. Three of those rows have no URL at all, so the fetch step threw "Invalid URL". Counted naively these are eight failures. They are the model correctly saying it found nothing, and a row like that cannot be verified by quote because absence has no sentence.
+
+The fetch failure is one government PDF that could not be fetched at all, so I can say nothing about that claim.
+
+The five "figure on the page, quote did not match" rows are the runner's false negatives. Four of them:
+
+- A table row from a government pass-rate page, quoted as `第一種衛生管理者 66,401 31,046 46.8`. The page text has the same cells separated by `|`, and my normalisation strips whitespace but not table pipes. Only 8 of the first 24 characters matched.
+- A PDF table whose cells come out of `pdftotext` interleaved with a heading. The model's quote is a clean reading of the table; the text layer is not.
+- A site's licence notice, where the model's quote uses the same wording as notices on other sites in the same run. This page says the same thing in different words.
+- A company page that says an app was downloaded "more than 9 million times". The model's quote rearranges two sentences of the page into one, so it is not on the page as written, though the number is.
+
+## The case where the figure was not on the page
+
+One row claimed the number of people who sat the national care-worker exam in fiscal 2024:
+
+- answer: `令和6年度 介護福祉士 受験者数: 75,387人`
+- quote: `介護福祉士 78,175 75,387 58,992 78.3`
+- source: the 2024 annual business report PDF of the body that runs the exam
+
+The model did call its page-reading tool on that URL during the run. The tool's output is not stored in the run log, so I cannot see what it received. What I can check is the document. I fetched it again today with the one-page checker:
+
+```sh
+bun scripts/verify-claim.mjs https://www.sssc.or.jp/about/pdf/r6/jigyouhoukoku_r6.pdf \
+  '75,?387' '78,?175' '58,?992' '介護福祉士'
+```
+
+All four patterns return `0 hits`. `pdfinfo` shows a 13-page report with no embedded images, so there is no scanned table the text layer could have missed. The report is about the organisation's own business; the words 介護福祉士 never appear in it. The quote reads like a row from an examination statistics table, so the numbers may well be real and sit on another page of the same site. I did not check that. The gate's answer is narrower: they are not on the page that was cited, and the claim stays out of the report.
+
+A summary that cites this PDF reads fine. The URL is a real government document, the row looks like a real table, and the figure is plausible. Without the quote check, the only way to find the problem is to open a 13-page PDF and search it.
+
+## The opposite error: a miss that was the fetch
+
+I had a second candidate from earlier notes: a price of ¥980 per month for a study site, which I had noted as stated by a directory page but "not found on the site's own page". That does not hold. The plain fetch of the site returns 332 characters, a JavaScript shell:
+
+```sh
+bun scripts/verify-claim.mjs https://ap-study-ai.com/ '980' '月額' '円'
+```
+
+Every pattern returns `0 hits`. Rerun with a browser and a ten-second wait (`--wait 10000`), the text is 945 characters and the page says `月額980円で全ての機能が使い放題`. The price was on the site all along, and my fetch could not see it. This one was not a run of the research tool, so it is not in the counts above. It is the same failure that the runner's under-1,000-character rule exists to catch, and it shows the check can mislead in the other direction when the fetch is weak.
+
+## Where it fails
+
+**False negatives** are the cases above: quotes the model slightly paraphrased, pages whose text comes out differently from how a person reads them (table pipes, interleaved PDF cells), pages that need JavaScript, and PDFs that are scans with no text layer. Those PDFs miss every time. A separate transcription step exists, but the runner does not call it.
+
+**False positives** are harder, and the 29 matches contain some. Five of them have the answer `0件` and a quote that is a generic sentence from the page, such as "Please select the country where you will take the exam." The quote is on the page. It does not show a zero, and a quote cannot show one. I now treat any `0件` row as unverified whatever the match says. For the other 24, I extracted every number of three or more digits from the `answer` field and looked for it in the cached page text. Eight rows have such numbers, and all of them are on the page. That is a check on one afternoon's rows, not part of the runner.
+
+The check also sees only the first 30 characters of the quote. A model that copies the opening of a sentence correctly and then finishes it with something else would pass. I did not find this in these rows. A longer match would raise the paraphrase false negatives, so I have left it at 30.
+
+## What I would change
+
+Treat `0件` as its own status, not a failed match. Strip table pipes in normalisation. Match the figure in the answer as well as the head of the quote. None of that changes the main design: the model proposes, and a script that never calls a model decides whether the quote is on the page. The report becomes a list of claims where I know which ones I can quote, and a shorter list of claims where I should go and look.
